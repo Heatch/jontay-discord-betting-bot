@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord.ui import Button, View
 import os
 from dotenv import load_dotenv
@@ -26,6 +26,12 @@ bets_collection = db.bets
 
 # Bot initial boot up
 class Client(commands.Bot):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    async def setup_hook(self):
+        self.check_lock_times.start()
+
     async def on_ready(self):
         print(f'Logged in as {self.user}')
 
@@ -40,7 +46,20 @@ class Client(commands.Bot):
     async def on_member_join(self, member):
         """When a new member joins the server, initialize their balance"""
         await ensure_user_exists(member.id)
-
+    
+    @tasks.loop(seconds=60) # Check every minute if a betting line should be locked
+    async def check_lock_times(self):
+        now = datetime.now()
+        for bet in bets_collection.find({"locks": {"$lte": now}, "locked": False}):
+            channel = self.get_channel(bet["channel_id"])
+            message = await channel.fetch_message(bet["message_id"])
+            new_embed = locking(message)
+            await message.edit(embed=new_embed, view=None)
+            bets_collection.update_one({"message_id": message.id}, {"$set": {"locked": True}})
+    
+    @check_lock_times.before_loop
+    async def before_check_lock_times(self):
+        await self.wait_until_ready()
 
 # Intent setup
 intents = discord.Intents.default()
@@ -245,9 +264,39 @@ async def give(interaction: discord.Interaction, amount: int, user: discord.Memb
     
     await interaction.response.send_message(embed=embed)
 
-@client.tree.command(name="pb", description="Places bet, usage: !pb <amount> <outcome #> <bet ID>", guild=GUILD_ID)
-async def place_bet(interaction: discord.Interaction, amount: int, outcome: int, bet_id: int):
-    await interaction.response.send_message(f"Placed bet of {amount} on outcome {outcome} for bet ID {bet_id}")
+# Locking betting line, for use in reaction button or from scheduled locking
+def locking(message):
+
+    old_embed = message.embeds[0]
+
+    # Create new embed with locked status
+    new_embed = discord.Embed(
+        title=f"🔒 {old_embed.title}",
+        description=old_embed.description,
+        color=0xfce11b  # Amber color to indicate locked/pending results
+    )
+
+    # Copy all fields
+    for field in old_embed.fields:
+        new_embed.add_field(
+            name=field.name,
+            value=field.value,
+            inline=field.inline
+        )
+    
+    # Copy other attributes
+    if old_embed.thumbnail:
+        new_embed.set_thumbnail(url=old_embed.thumbnail.url)
+    if old_embed.author:
+        new_embed.set_author(
+            name=old_embed.author.name,
+            icon_url=old_embed.author.icon_url
+        )
+    new_embed.set_footer(text="🔒 This betting line is now LOCKED and pending results")
+
+    bets_collection.update_one({"message_id": message.id}, {"$set": {"locked": True}})
+
+    return new_embed
 
 # Locking button
 class LockButton(View):
@@ -270,42 +319,16 @@ class LockButton(View):
                 return
             
             message = interaction.message
-            old_embed = message.embeds[0]
-
-            # Create new embed with locked status
-            new_embed = discord.Embed(
-                title=f"🔒 {old_embed.title}",
-                description=old_embed.description,
-                color=0xfce11b  # Amber color to indicate locked/pending results
-            )
-
-            # Copy all fields
-            for field in old_embed.fields:
-                new_embed.add_field(
-                    name=field.name,
-                    value=field.value,
-                    inline=field.inline
-                )
+            new_embed = locking(message)
+            await message.edit(embed=new_embed, view=None)
             
-            # Copy other attributes
-            if old_embed.thumbnail:
-                new_embed.set_thumbnail(url=old_embed.thumbnail.url)
-            if old_embed.author:
-                new_embed.set_author(
-                    name=old_embed.author.name,
-                    icon_url=old_embed.author.icon_url
-                )
-            new_embed.set_footer(text="🔒 This betting line is now LOCKED and pending results")
-
-            await message.edit(embed=new_embed)
             await interaction.response.send_message("✅ Betting line locked!", ephemeral=True)
-            bets_collection.update_one({"message_id": message.id}, {"$set": {"locked": True}})
     
         lock_button.callback = lock_callback
 
 # For admin to create a betting line
 @client.tree.command(name="cl", description="Creates a betting line, usage: !cl <title> <descrip> <ID> <outcomes|probabilities> <lock>", guild=GUILD_ID)    
-async def create_line(interaction: discord.Interaction, title: str, description: str, outcomes: str, locks: str = None):
+async def create_line(interaction: discord.Interaction, title: str, description: str, outcomes: str, locks: str = None, restricted1: discord.Member = None, restricted2: discord.Member = None, restricted3: discord.Member = None):
 
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
@@ -332,16 +355,115 @@ async def create_line(interaction: discord.Interaction, title: str, description:
     message = await interaction.original_response()
     embed_id = message.id
 
+    banned_IDS = []
+    for crodie in [restricted1, restricted2, restricted3]:
+        if crodie is not None:
+            banned_IDS.append(crodie.id)
+
     bets_collection.insert_one(
         {
             "id": bet_id,
+            "title": title,
             "outcomes": outcomes,
             "locks": datetime.strptime(locks, "%m/%d/%Y %H:%M") if locks is not None else None,
             "locked": False,
             "message_id": embed_id,
-            "channel_id": interaction.channel.id
+            "channel_id": interaction.channel.id,
+            "restricted_users": banned_IDS
         }
     )
+
+# Betting on a line
+@client.tree.command(name="pb", description="Places bet, usage: !pb <amount> <outcome #> <bet ID>", guild=GUILD_ID)
+async def place_bet(interaction: discord.Interaction, bet_id: int, outcome: int, amount: int):
+    
+    user = ensure_user_exists(interaction.user.id)
+    user_id = user["_id"]
+
+    try:
+        bet = bets_collection.find_one({"id": bet_id})
+    except:
+        await interaction.response.send_message(f"❌ Bet with ID #{bet_id} not found!", ephemeral=True)
+        return
+
+    if user_id in bet["restricted_users"]:
+        await interaction.response.send_message("❌ You are not allowed to bet on this line due to a conflict of interest!", ephemeral=True)
+        return
+    elif bet["locked"]:  # Check if line is locked
+        await interaction.response.send_message("❌ This betting line is no longer accepting bets!", ephemeral=True)
+        return 
+    elif user["balance"] < amount:  # Check if user has enough balance
+        await interaction.response.send_message(f"❌ You don't have enough {CURRENCY_NAME}🧚💨 to place this bet!", ephemeral=True)
+        return
+    elif outcome < 1 or outcome > len(bet["outcomes"].split(',')):  # Check if outcome number is valid
+        await interaction.response.send_message("❌ Invalid outcome number!", ephemeral=True)
+        return
+    
+    # Get betting data
+    betting_data = odds(bet["outcomes"])
+    outcome_name = list(betting_data.keys())[outcome - 1]
+    payout = amount * betting_data[outcome_name]["decimal_odds"]
+   
+    # Create confirmation embed
+    embed = discord.Embed(
+        title="🎲 Bet Confirmation",
+        description=f"Please react with ✅ to confirm or ❌ to cancel your bet:",
+        color=0x03c2fc
+    )
+    embed.add_field(
+        name="Bet Details",
+        value=f"Amount: ₾**{amount:,}** {CURRENCY_NAME}🧚💨\n"
+              f"Outcome: **{outcome_name}**\n"
+              f"Potential Payout: ₾**{payout:,.2f}** {CURRENCY_NAME}🧚💨\n"
+              f"Bet ID: #{bet_id}",
+        inline=False
+    )
+
+    # Send confirmation message
+    await interaction.response.send_message(embed=embed, ephemeral=False)
+    conf_message = await interaction.original_response()
+    
+    # Add reactions
+    await conf_message.add_reaction("✅")
+    await conf_message.add_reaction("❌")
+
+    def check(reaction, user):
+        return user == interaction.user and str(reaction.emoji) in ["✅", "❌"] and reaction.message == conf_message
+    
+    try:
+        #wait
+        reaction, user = await client.wait_for("reaction_add", timeout=15.0, check=check)
+
+        if str(reaction.emoji) == "✅":
+            if user["balance"] < amount:  # Check if user has enough balance
+                await interaction.response.send_message(f"❌ You don't have enough {CURRENCY_NAME}🧚💨 to place this bet!", ephemeral=True)
+                return
+            # Update user balance
+            users_collection.update_one({"_id": user_id}, {"$inc": {"balance": -amount}})
+            # Add to user's open bets
+            users_collection.update_one({"_id": user_id}, {"$push": {"bets": {"bet_id": bet_id, "outcome": outcome, "amount": amount, "payout": payout, "result": None}}})
+            # Add user's ID to bet's participants
+            bets_collection.update_one({"id": bet_id}, {"$push": {"participants": user_id}})
+            await interaction.response.send_message("✅ Bet placed successfully!", ephemeral=False)
+        else:
+            cancel_embed = discord.Embed(
+                title="❌ Bet Cancelled",
+                description="Your bet has been cancelled.",
+                color=0xff0000
+            )
+            await conf_message.edit(embed=cancel_embed)
+    except TimeoutError:
+        timeout_embed = discord.Embed(
+            title="⏰ Timeout",
+            description="Bet confirmation timed out.",
+            color=0xff0000
+        )
+        await conf_message.edit(embed=timeout_embed)
+
+    try:
+        await conf_message.clear_reactions()
+    except:
+        pass
 
 # Update odds for a betting line
 @client.tree.command(name="uo", description="Update odds for a betting line, usage: !uo <bet ID> <outcomes|probabilities>", guild=GUILD_ID)
