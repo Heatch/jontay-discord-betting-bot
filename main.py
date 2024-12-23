@@ -327,7 +327,7 @@ class LockButton(View):
         lock_button.callback = lock_callback
 
 # For admin to create a betting line
-@client.tree.command(name="cl", description="Creates a betting line, usage: !cl <title> <descrip> <ID> <outcomes|probabilities> <lock>", guild=GUILD_ID)    
+@client.tree.command(name="cl", description="Creates a betting line, usage: /cl <title> <descrip> <ID> <outcomes|probabilities> <lock>", guild=GUILD_ID)    
 async def create_line(interaction: discord.Interaction, title: str, description: str, outcomes: str, locks: str = None, restricted1: discord.Member = None, restricted2: discord.Member = None, restricted3: discord.Member = None):
 
     if not interaction.user.guild_permissions.administrator:
@@ -369,40 +369,51 @@ async def create_line(interaction: discord.Interaction, title: str, description:
             "locked": False,
             "message_id": embed_id,
             "channel_id": interaction.channel.id,
-            "restricted_users": banned_IDS
+            "restricted_users": banned_IDS,
+            "participants": []
         }
     )
 
 # Betting on a line
-@client.tree.command(name="pb", description="Places bet, usage: !pb <amount> <outcome #> <bet ID>", guild=GUILD_ID)
-async def place_bet(interaction: discord.Interaction, bet_id: int, outcome: int, amount: int):
+@client.tree.command(name="bet", description="Places bet, usage: /bet <amount> <outcome #> <bet ID>", guild=GUILD_ID)
+async def place_bet(interaction: discord.Interaction, bet_id: int, outcome: int, amount: float):
     
-    user = ensure_user_exists(interaction.user.id)
+    user = await ensure_user_exists(interaction.user.id)
     user_id = user["_id"]
 
     try:
         bet = bets_collection.find_one({"id": bet_id})
-    except:
-        await interaction.response.send_message(f"❌ Bet with ID #{bet_id} not found!", ephemeral=True)
+        if not bet:
+            await interaction.response.send_message(f"❌ Bet with ID #{bet_id} not found!", ephemeral=True)
+            return
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error finding bet: {str(e)}", ephemeral=True)
         return
 
     if user_id in bet["restricted_users"]:
         await interaction.response.send_message("❌ You are not allowed to bet on this line due to a conflict of interest!", ephemeral=True)
         return
-    elif bet["locked"]:  # Check if line is locked
+    elif user_id in bet["participants"]:
+        await interaction.response.send_message("❌ You have already a bet on this line!", ephemeral=True)
+        return
+    elif bet["locked"]:
         await interaction.response.send_message("❌ This betting line is no longer accepting bets!", ephemeral=True)
         return 
-    elif user["balance"] < amount:  # Check if user has enough balance
+    elif user["balance"] < amount:
         await interaction.response.send_message(f"❌ You don't have enough {CURRENCY_NAME}🧚💨 to place this bet!", ephemeral=True)
         return
-    elif outcome < 1 or outcome > len(bet["outcomes"].split(',')):  # Check if outcome number is valid
+    elif outcome < 1 or outcome > len(bet["outcomes"].split(',')):
         await interaction.response.send_message("❌ Invalid outcome number!", ephemeral=True)
         return
     
     # Get betting data
-    betting_data = odds(bet["outcomes"])
-    outcome_name = list(betting_data.keys())[outcome - 1]
-    payout = amount * betting_data[outcome_name]["decimal_odds"]
+    try:
+        betting_data = odds(bet["outcomes"])
+        outcome_name = list(betting_data.keys())[outcome - 1]
+        payout = amount * betting_data[outcome_name]["decimal_odds"]
+    except:
+        await interaction.response.send_message("❌ Failed to place bet. Please check request input and try again!", ephemeral=True)
+        return
    
     # Create confirmation embed
     embed = discord.Embed(
@@ -427,24 +438,63 @@ async def place_bet(interaction: discord.Interaction, bet_id: int, outcome: int,
     await conf_message.add_reaction("✅")
     await conf_message.add_reaction("❌")
 
-    def check(reaction, user):
-        return user == interaction.user and str(reaction.emoji) in ["✅", "❌"] and reaction.message == conf_message
+    def check(reaction, reaction_user):
+        return reaction_user.id == interaction.user.id and str(reaction.emoji) in ["✅", "❌"] and reaction.message == conf_message
     
     try:
-        #wait
-        reaction, user = await client.wait_for("reaction_add", timeout=15.0, check=check)
+        reaction, _ = await client.wait_for("reaction_add", timeout=15.0, check=check)
 
         if str(reaction.emoji) == "✅":
-            if user["balance"] < amount:  # Check if user has enough balance
-                await interaction.response.send_message(f"❌ You don't have enough {CURRENCY_NAME}🧚💨 to place this bet!", ephemeral=True)
+            # Get fresh user data to check balance again
+            current_user = await ensure_user_exists(interaction.user.id)
+            if current_user["balance"] < amount:
+                error_embed = discord.Embed(
+                    title="❌ Insufficient Balance",
+                    description=f"You don't have enough {CURRENCY_NAME}🧚💨 to place this bet!",
+                    color=0xff0000
+                )
+                await conf_message.edit(embed=error_embed)
                 return
+
             # Update user balance
             users_collection.update_one({"_id": user_id}, {"$inc": {"balance": -amount}})
+            
             # Add to user's open bets
-            users_collection.update_one({"_id": user_id}, {"$push": {"bets": {"bet_id": bet_id, "outcome": outcome, "amount": amount, "payout": payout, "result": None}}})
+            users_collection.update_one(
+                {"_id": user_id}, 
+                {"$push": {"bets": {
+                    "bet_id": bet_id, 
+                    "outcome_num": outcome,
+                    "outcome": outcome_name, 
+                    "amount": amount, 
+                    "payout": payout, 
+                    "result": None,
+                    "placed_at": datetime.now()
+                }}}
+            )
+            
             # Add user's ID to bet's participants
-            bets_collection.update_one({"id": bet_id}, {"$push": {"participants": user_id}})
-            await interaction.response.send_message("✅ Bet placed successfully!", ephemeral=False)
+            bets_collection.update_one(
+                {"id": bet_id}, 
+                {"$push": {"participants": user_id}}
+            )
+
+            # Success embed
+            success_embed = discord.Embed(
+                title="✅ Bet Placed Successfully!",
+                description=f"Your bet has been confirmed.",
+                color=0x00ff00
+            )
+            success_embed.add_field(
+                name="Bet Details",
+                value=f"Amount: ₾**{amount:,}** {CURRENCY_NAME}🧚💨\n"
+                      f"Outcome: **{outcome_name}**\n"
+                      f"Potential Payout: ₾**{payout:,.2f}** {CURRENCY_NAME}🧚💨\n"
+                      f"Bet ID: #{bet_id}",
+                inline=False
+            )
+            await conf_message.edit(embed=success_embed)
+
         else:
             cancel_embed = discord.Embed(
                 title="❌ Bet Cancelled",
@@ -452,6 +502,7 @@ async def place_bet(interaction: discord.Interaction, bet_id: int, outcome: int,
                 color=0xff0000
             )
             await conf_message.edit(embed=cancel_embed)
+
     except TimeoutError:
         timeout_embed = discord.Embed(
             title="⏰ Timeout",
@@ -503,6 +554,207 @@ async def update_odds(interaction: discord.Interaction, bet_id: int, outcomes: s
     bets_collection.update_one({"id": bet_id}, {"$set": {"outcomes": outcomes}})
 
     await interaction.response.send_message(f"Updated odds for bet ID {bet_id}", ephemeral=True)
+
+# Close/anull a betting line
+@client.tree.command(name="close", description="Close a betting line, usage: !close <bet ID> <reason>", guild=GUILD_ID)
+async def close_bet(interaction: discord.Interaction, bet_id: int, reason: str):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+    
+    bet = bets_collection.find_one({"id": bet_id})
+    if not bet:
+        await interaction.response.send_message(f"Bet with ID {bet_id} not found!", ephemeral=True)
+        return
+    
+    title = bet["title"]
+    participants = bet["participants"]
+    
+    # Process refunds for each participant
+    for user_id in participants:
+        user_doc = users_collection.find_one({"_id": user_id})
+        if user_doc and "bets" in user_doc:
+            # Find the specific bet for this user
+            for user_bet in user_doc["bets"]:
+                if user_bet.get("bet_id") == bet_id:
+                    # Refund the wagered amount
+                    amount_wagered = user_bet.get("amount", 0)
+                    users_collection.update_one(
+                        {"_id": user_id},
+                        {
+                            "$inc": {"balance": amount_wagered},  # Refund the amount
+                            "$pull": {"bets": {"bet_id": bet_id}}  # Remove the bet
+                        }
+                    )
+    
+    # Delete the bet
+    bets_collection.delete_one({"id": bet_id})
+    
+    # Delete the original message
+    try:
+        message = await interaction.channel.fetch_message(bet["message_id"])
+        await message.delete()
+    except:
+        pass  # Message might already be deleted
+
+    # Create ping string for all participants
+    toPing = " ".join(f"<@{user_id}>" for user_id in participants)
+
+    embed = discord.Embed(
+        title="Betting Line Closed",
+        description=f"""Please be alerted that Bet ID #{bet_id} "**{title}**" has been annulled.\nAll wagered amounts have been refunded.""",
+        color=0xff0000  # Red color for closure
+    )
+    embed.add_field(name="Reason", value=reason, inline=False)
+    if toPing:
+        embed.add_field(name="Relevant Participants", value=toPing, inline=False)
+
+    await interaction.response.send_message(embed=embed)
+
+# Resolve a betting line
+@client.tree.command(name="resolve", description="Resolve a betting line", guild=GUILD_ID)
+async def resolve_bet(interaction: discord.Interaction, bet_id: int, winning_outcome: int, outcome: str):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+    
+    # Find the bet
+    bet = bets_collection.find_one({"id": bet_id})
+    if not bet:
+        await interaction.response.send_message(f"Bet with ID {bet_id} not found!", ephemeral=True)
+        return
+    
+    title = bet["title"]
+    participants = bet["participants"]
+    winners = []
+    losers = []
+    
+    # Process payouts for each participant
+    for user_id in participants:
+        user_info = users_collection.find_one({"_id": user_id})
+        if not user_info or "bets" not in user_info:
+            continue
+        
+        # Find the relevant bet
+        relevant_bet = next(
+            (bet for bet in user_info["bets"] if bet["bet_id"] == bet_id),
+            None
+        )
+        
+        if relevant_bet:
+            amount_wagered = relevant_bet["amount"]
+            predicted = relevant_bet["outcome"]
+            outcome_num = relevant_bet["outcome_num"]
+            potential_payout = relevant_bet["payout"]
+            
+            if outcome_num == winning_outcome:
+                # User won
+                receipt = {
+                    "bet": title,
+                    "result": "win",
+                    "prediction": predicted,
+                    "wagered": amount_wagered,
+                    "amount_won": potential_payout - amount_wagered,
+                    "resolved_at": datetime.now()
+                }
+                users_collection.update_one(
+                    {"_id": user_id},
+                    {
+                        "$inc": {"balance": potential_payout},
+                        "$pull": {"bets": {"bet_id": bet_id}},
+                        "$push": {"history": receipt}
+                    }
+                )
+                winners.append({
+                    "user_id": user_id,
+                    "payout": potential_payout,
+                    "wagered": amount_wagered
+                })
+            else:
+                # User lost
+                receipt = {
+                    "bet": title,
+                    "result": "loss",
+                    "prediction": predicted,
+                    "wagered": amount_wagered,
+                    "resolved_at": datetime.now()
+                }
+                # Fixed update operation for losers
+                users_collection.update_one(
+                    {"_id": user_id},
+                    {
+                        "$pull": {"bets": {"bet_id": bet_id}},
+                        "$push": {"history": receipt}
+                    }
+                )
+                losers.append({
+                    "user_id": user_id,
+                    "wagered": amount_wagered
+                })
+    
+    # Create result embed
+    embed = discord.Embed(
+        title="🎲 Betting Results",
+        description=f"Results for **{title}**\nWinning Outcome: **{outcome}**",
+        color=0x00ff00
+    )
+    
+    # Add winners section
+    if winners:
+        winners_text = "\n".join(
+            f"<@{w['user_id']}> - Won ₾**{w['payout']:,.2f}** (Bet: ₾{w['wagered']:,.2f})"
+            for w in winners
+        )
+        embed.add_field(name="🏆 Winners", value=winners_text, inline=False)
+    
+    # Add losers section
+    if losers:
+        losers_text = "\n".join(
+            f"<@{l['user_id']}> - Lost ₾**{l['wagered']:,.2f}**"
+            for l in losers
+        )
+        embed.add_field(name="❌ Losers", value=losers_text, inline=False)
+    
+    # Delete the original bet message
+    try:
+        message = await interaction.channel.fetch_message(bet["message_id"])
+        await message.delete()
+    except:
+        pass
+    
+    # Delete the bet from database
+    bets_collection.delete_one({"id": bet_id})
+    
+    await interaction.response.send_message(embed=embed)
+
+# See open bets
+@client.tree.command(name="open", description="View your open bets", guild=GUILD_ID)
+async def open_bets(interaction: discord.Interaction):
+    user = await ensure_user_exists(interaction.user.id)
+    if "bets" not in user or not user["bets"]:
+        await interaction.response.send_message("You have no open bets!", ephemeral=True)
+        return
+    
+    embed = discord.Embed(
+        title="🎲 Open Bets",
+        description="Here are your current open bets:",
+        color=0x03c2fc
+    )
+    
+    for placed in user["bets"]:
+        bet = bets_collection.find_one({"id": placed["bet_id"]})
+        embed.add_field(
+            name=f"Bet ID #{bet['id']} - {bet['title']}",
+            value=(f"Outcome: **{placed['outcome']}**\n"
+                f"Wagered Amount: ₾**{placed['amount']:,.2f}** {CURRENCY_NAME}🧚💨\n"
+                f"Payout: ₾**{placed['payout']:,.2f}** {CURRENCY_NAME}🧚💨\n"
+                f"Placed: {locktime(placed['placed_at'])}"),
+            inline=False
+        )
+
+    embed.set_thumbnail(url="https://tikolu.net/i/tcicn.png")
+    
+    await interaction.response.send_message(embed=embed)
 
 # Start the bot
 TOKEN = os.getenv('DISCORD_TOKEN')
