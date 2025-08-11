@@ -7,16 +7,19 @@ from gambling import odds, locktime
 from pymongo.mongo_client import MongoClient
 from datetime import datetime, timedelta
 import random
+import webserver
 
 # Constants
 INITIAL_BALANCE = 1000
-CURRENCY_NAME = "fairydust"
+CURRENCY_NAME = "chekels"
 
 # Getting environment variables
 load_dotenv()
 SERVER_ID = os.getenv('COVID_ID')
 GUILD_ID = discord.Object(id=int(SERVER_ID))
 MONGO_URI = os.getenv('uri')
+PROP_CHANNEL = os.getenv('PROPOSALS_CHANNEL_ID')
+BETTING_CHANNEL = os.getenv('BETTING_CHANNEL_ID')
 
 # Create a new client and connect to the server
 mclient = MongoClient(MONGO_URI)
@@ -90,16 +93,20 @@ async def get_balance(user_id: int) -> int:
 @client.tree.command(name="bal", description=f"Check your {CURRENCY_NAME} balance", guild=GUILD_ID)
 async def balance(interaction: discord.Interaction, user: discord.Member = None):
 
-     # If no user is specified, check own balance
+    if interaction.channel.id != int(BETTING_CHANNEL):
+        await interaction.response.send_message("You can only check your balance in the #betting channel!", ephemeral=True)
+        return
+
+    # If no user is specified, check own balance
     target_user = user if user else interaction.user
     user_balance = await get_balance(target_user.id)
 
     if target_user == interaction.user:
         title="💰 Balance Check"
-        description = f"You have ₾**{user_balance:,}** {CURRENCY_NAME} 🧚💨"
+        description = f"You have ₾**{user_balance:,}** {CURRENCY_NAME} 🤑"
     else:
         title = f"💰 {target_user.display_name}'s Balance"
-        description = f"They have ₾**{user_balance:,}** {CURRENCY_NAME} 🧚💨"
+        description = f"They have ₾**{user_balance:,}** {CURRENCY_NAME} 🤑"
     
     embed = discord.Embed(
         title=title,
@@ -112,12 +119,17 @@ async def balance(interaction: discord.Interaction, user: discord.Member = None)
 # Viewing leaderboard
 @client.tree.command(name="leader", description=f"Shows the top 5 richest users", guild=GUILD_ID)
 async def leaderboard(interaction: discord.Interaction):
+
+    if interaction.channel.id != int(BETTING_CHANNEL):
+        await interaction.response.send_message("You can only check the leaderboard in the #betting channel!", ephemeral=True)
+        return
+
     # Get top 5 users sorted by balance
     top_users = list(users_collection.find().sort("balance", -1).limit(5))
     
     embed = discord.Embed(
         title="🏆 Richest Users",
-        description=f"Top 5 {CURRENCY_NAME}🧚💨 holders",
+        description=f"Top 5 {CURRENCY_NAME}🤑 holders",
         color=0xfa99e7
     )
     
@@ -158,6 +170,11 @@ async def can_claim_daily(user_id: int) -> bool:
 # Let user claim daily
 @client.tree.command(name="daily", description=f"Claim your daily {CURRENCY_NAME}", guild=GUILD_ID)
 async def daily(interaction: discord.Interaction):
+
+    if interaction.channel.id != int(BETTING_CHANNEL):
+        await interaction.response.send_message("You can only claim your daily reward in the #betting channel!", ephemeral=True)
+        return
+
     # Ensure user exists
     await ensure_user_exists(interaction.user.id)
     
@@ -195,12 +212,12 @@ async def daily(interaction: discord.Interaction):
     # Create embed response
     embed = discord.Embed(
         title="✨ Daily Reward Claimed!",
-        description=f"You received **₾{reward:,}** {CURRENCY_NAME}🧚💨!",
+        description=f"You received **₾{reward:,}** {CURRENCY_NAME}🤑!",
         color=0x059415
     )
     embed.add_field(
         name="New Balance",
-        value=f"₾{new_balance:,} {CURRENCY_NAME}🧚💨",
+        value=f"₾{new_balance:,} {CURRENCY_NAME}🤑",
         inline=False
     )
 
@@ -210,14 +227,15 @@ async def daily(interaction: discord.Interaction):
 # Give another user some fairy dust
 @client.tree.command(name="give", description=f"Give another user some {CURRENCY_NAME}", guild=GUILD_ID)
 async def give(interaction: discord.Interaction, amount: int, user: discord.Member):
-    # Check if amount is valid
-    if amount < 1:
-        await interaction.response.send_message("❌You must give at least 1 fairy dust!", ephemeral=True)
+
+    if interaction.channel.id != int(BETTING_CHANNEL):
+        await interaction.response.send_message(f"You can only give {CURRENCY_NAME} in the #betting channel!", ephemeral=True)
         return
-    
-    # Check if user is trying to give to themselves
-    if user.id == interaction.user.id:
-        await interaction.response.send_message("❌You can't give fairy dust to yourself!", ephemeral=True)
+    elif amount < 1:
+        await interaction.response.send_message(f"❌You must give at least 1 {CURRENCY_NAME}!", ephemeral=True)
+        return
+    elif user.id == interaction.user.id:
+        await interaction.response.send_message(f"❌You can't give {CURRENCY_NAME} to yourself!", ephemeral=True)
         return
 
     # Ensure both users exist and get balances
@@ -228,7 +246,7 @@ async def give(interaction: discord.Interaction, amount: int, user: discord.Memb
     
     # Check if sender has enough balance
     if sender_balance < amount:
-        await interaction.response.send_message("❌You don't have enough fairy dust to give!", ephemeral=True)
+        await interaction.response.send_message(f"❌You don't have enough {CURRENCY_NAME} to give!", ephemeral=True)
         return
     
     # Update balances
@@ -248,17 +266,17 @@ async def give(interaction: discord.Interaction, amount: int, user: discord.Memb
     # Create embed response
     embed = discord.Embed(
         title="🎁 Fairy Dust Gifted!",
-        description=f"You successfully gave **₾{amount:,}** {CURRENCY_NAME}🧚💨 to {user.mention}!",
+        description=f"You successfully gave **₾{amount:,}** {CURRENCY_NAME}🤑 to {user.mention}!",
         color=0x059415
     )
     embed.add_field(
         name="Your New Balance",
-        value=f"₾{new_sender_balance:,} {CURRENCY_NAME}🧚💨",
+        value=f"₾{new_sender_balance:,} {CURRENCY_NAME}🤑",
         inline=False
     )
     embed.add_field(
         name=f"{user.display_name}'s New Balance",
-        value=f"₾{new_receiver_balance:,} {CURRENCY_NAME}🧚💨",
+        value=f"₾{new_receiver_balance:,} {CURRENCY_NAME}🤑",
         inline=False
     )
     
@@ -378,6 +396,10 @@ async def create_line(interaction: discord.Interaction, title: str, description:
 @client.tree.command(name="bet", description="Places bet, usage: /bet <amount> <outcome #> <bet ID>", guild=GUILD_ID)
 async def place_bet(interaction: discord.Interaction, bet_id: int, outcome: int, amount: float):
     
+    if interaction.channel.id != int(BETTING_CHANNEL):
+        await interaction.response.send_message("You can only place bets in the #betting channel!", ephemeral=True)
+        return
+
     user = await ensure_user_exists(interaction.user.id)
     user_id = user["_id"]
 
@@ -400,7 +422,7 @@ async def place_bet(interaction: discord.Interaction, bet_id: int, outcome: int,
         await interaction.response.send_message("❌ This betting line is no longer accepting bets!", ephemeral=True)
         return 
     elif user["balance"] < amount:
-        await interaction.response.send_message(f"❌ You don't have enough {CURRENCY_NAME}🧚💨 to place this bet!", ephemeral=True)
+        await interaction.response.send_message(f"❌ You don't have enough {CURRENCY_NAME}🤑 to place this bet!", ephemeral=True)
         return
     elif outcome < 1 or outcome > len(bet["outcomes"].split(',')):
         await interaction.response.send_message("❌ Invalid outcome number!", ephemeral=True)
@@ -423,9 +445,9 @@ async def place_bet(interaction: discord.Interaction, bet_id: int, outcome: int,
     )
     embed.add_field(
         name="Bet Details",
-        value=f"Amount: ₾**{amount:,}** {CURRENCY_NAME}🧚💨\n"
+        value=f"Amount: ₾**{amount:,}** {CURRENCY_NAME}🤑\n"
               f"Outcome: **{outcome_name}**\n"
-              f"Potential Payout: ₾**{payout:,.2f}** {CURRENCY_NAME}🧚💨\n"
+              f"Potential Payout: ₾**{payout:,.2f}** {CURRENCY_NAME}🤑\n"
               f"Bet ID: #{bet_id}",
         inline=False
     )
@@ -450,7 +472,7 @@ async def place_bet(interaction: discord.Interaction, bet_id: int, outcome: int,
             if current_user["balance"] < amount:
                 error_embed = discord.Embed(
                     title="❌ Insufficient Balance",
-                    description=f"You don't have enough {CURRENCY_NAME}🧚💨 to place this bet!",
+                    description=f"You don't have enough {CURRENCY_NAME}🤑 to place this bet!",
                     color=0xff0000
                 )
                 await conf_message.edit(embed=error_embed)
@@ -487,9 +509,9 @@ async def place_bet(interaction: discord.Interaction, bet_id: int, outcome: int,
             )
             success_embed.add_field(
                 name="Bet Details",
-                value=f"Amount: ₾**{amount:,}** {CURRENCY_NAME}🧚💨\n"
+                value=f"Amount: ₾**{amount:,}** {CURRENCY_NAME}🤑\n"
                       f"Outcome: **{outcome_name}**\n"
-                      f"Potential Payout: ₾**{payout:,.2f}** {CURRENCY_NAME}🧚💨\n"
+                      f"Potential Payout: ₾**{payout:,.2f}** {CURRENCY_NAME}🤑\n"
                       f"Bet ID: #{bet_id}",
                 inline=False
             )
@@ -729,33 +751,229 @@ async def resolve_bet(interaction: discord.Interaction, bet_id: int, winning_out
 
 # See open bets
 @client.tree.command(name="open", description="View your open bets", guild=GUILD_ID)
-async def open_bets(interaction: discord.Interaction):
-    user = await ensure_user_exists(interaction.user.id)
-    if "bets" not in user or not user["bets"]:
-        await interaction.response.send_message("You have no open bets!", ephemeral=True)
+async def open_bets(interaction: discord.Interaction, user: discord.Member = None):
+
+    if interaction.channel.id != int(BETTING_CHANNEL):
+        await interaction.response.send_message("You can only view open bets in the #betting channel!", ephemeral=True)
+        return
+
+    # Get target user and ensure they exist in database
+    target_user = user if user else interaction.user
+    user_data = await ensure_user_exists(target_user.id)
+
+    if "bets" not in user_data or not user_data["bets"]:
+        await interaction.response.send_message(
+            f"No open bets found for {target_user.display_name}!", 
+            ephemeral=True
+        )
         return
     
     embed = discord.Embed(
-        title="🎲 Open Bets",
-        description="Here are your current open bets:",
+        title=f"🎲 Open Bets - {target_user.display_name}",
+        description=f"Currently active bets for {target_user.display_name}",
         color=0x03c2fc
     )
     
-    for placed in user["bets"]:
-        bet = bets_collection.find_one({"id": placed["bet_id"]})
+    total_potential = 0
+    total_wagered = 0
+    
+    for placed in user_data["bets"]:
+        try:
+            bet = bets_collection.find_one({"id": placed["bet_id"]})
+            if not bet:
+                continue  # Skip if bet doesn't exist anymore
+                
+            total_potential += placed["payout"]
+            total_wagered += placed["amount"]
+            
+            # Format placed_at datetime
+            placed_time = placed.get("placed_at")
+            if isinstance(placed_time, str):
+                placed_time = datetime.strptime(placed_time, "%m/%d/%Y %H:%M")
+            time_str = placed_time.strftime("%m/%d/%Y %I:%M %p") if placed_time else "Unknown"
+            
+            embed.add_field(
+                name=f"Bet ID #{bet['id']} - {bet['title']}",
+                value=(f"Outcome: **{placed['outcome']}**\n"
+                      f"Wagered Amount: ₾**{placed['amount']:,.2f}** {CURRENCY_NAME}🤑\n"
+                      f"Potential Payout: ₾**{placed['payout']:,.2f}** {CURRENCY_NAME}🤑\n"
+                      f"Placed: {time_str}"),
+                inline=False
+            )
+        except Exception as e:
+            print(f"Error processing bet {placed.get('bet_id')}: {str(e)}")
+            continue
+
+    # Add summary field
+    if user_data["bets"]:
+        summary = (
+            f"Total Bets: **{len(user_data['bets'])}**\n"
+            f"Total Wagered: ₾**{total_wagered:,.2f}** {CURRENCY_NAME}🤑\n"
+            f"Total Potential Payout: ₾**{total_potential:,.2f}** {CURRENCY_NAME}🤑"
+        )
         embed.add_field(
-            name=f"Bet ID #{bet['id']} - {bet['title']}",
-            value=(f"Outcome: **{placed['outcome']}**\n"
-                f"Wagered Amount: ₾**{placed['amount']:,.2f}** {CURRENCY_NAME}🧚💨\n"
-                f"Payout: ₾**{placed['payout']:,.2f}** {CURRENCY_NAME}🧚💨\n"
-                f"Placed: {locktime(placed['placed_at'])}"),
+            name="📊 Summary",
+            value=summary,
             inline=False
         )
 
     embed.set_thumbnail(url="https://tikolu.net/i/tcicn.png")
+    embed.set_footer(text="Use /history to view past bets")
     
+    await interaction.response.send_message(embed=embed)
+
+# See betting history
+@client.tree.command(name="history", description="View your betting history", guild=GUILD_ID)
+async def betting_history(interaction: discord.Interaction, user: discord.Member = None):
+
+    if interaction.channel.id != int(BETTING_CHANNEL):
+        await interaction.response.send_message("You can only view your betting history in the #betting channel!", ephemeral=True)
+        return
+
+    # Get target user and ensure they exist in database
+    target_user = user if user else interaction.user
+    user_data = await ensure_user_exists(target_user.id)
+
+    if "history" not in user_data or not user_data["history"]:
+        await interaction.response.send_message(
+            f"No betting history found for {target_user.display_name}!", 
+            ephemeral=True
+        )
+        return
+    
+    embed = discord.Embed(
+        title=f"📜 Betting History - {target_user.display_name}",
+        color=0x03c2fc
+    )
+    
+    # Get last 5 bets (or however many you want to show)
+    recent_bets = user_data["history"][-5:]
+    
+    for receipt in reversed(recent_bets):  # Show most recent first
+        bet = receipt["bet"]
+        result = receipt["result"]
+        prediction = receipt["prediction"]
+        wagered = receipt["wagered"]
+        resolved_at = receipt["resolved_at"]
+        
+        # Emoji based on result
+        result_emoji = "✅" if result == "win" else "❌"
+        
+        if result == "win":
+            amount_won = receipt["amount_won"]
+            value = f"**Won ₾{amount_won:,.2f}** (Bet: ₾{wagered:,.2f})"
+        else:
+            value = f"**Lost ₾{wagered:,.2f}**"
+        
+        embed.add_field(
+            name=f"{result_emoji} {bet}",
+            value=(f"Prediction: **{prediction}**\n"
+                  f"Wagered Amount: ₾**{wagered:,.2f}** {CURRENCY_NAME}🤑\n"
+                  f"{value}\n"
+                  f"Resolved: {odds(resolved_at)}"),
+            inline=False
+        )
+
+    # Add statistics
+    total_bets = len(user_data["history"])
+    wins = sum(1 for bet in user_data["history"] if bet["result"] == "win")
+    win_rate = (wins / total_bets) * 100 if total_bets > 0 else 0
+    
+    total_wagered = sum(bet["wagered"] for bet in user_data["history"])
+    total_won = sum(bet.get("amount_won", 0) for bet in user_data["history"] if bet["result"] == "win")
+    profit = total_won - total_wagered
+    
+    stats = (
+        f"Total Bets: **{total_bets}**\n"
+        f"Wins: **{wins}** ({win_rate:.1f}%)\n"
+        f"Total Wagered: ₾**{total_wagered:,.2f}**\n"
+        f"Net Profit: ₾**{profit:,.2f}**"
+    )
+    
+    embed.add_field(
+        name="📊 Statistics",
+        value=stats,
+        inline=False
+    )
+
+    embed.set_thumbnail(url="https://tikolu.net/i/tcicn.png")
+    embed.set_footer(text="Showing last 5 bets")
+    
+    await interaction.response.send_message(embed=embed)
+
+# User bet proposition
+@client.tree.command(name="proposal", description="Propose a bet, usage: <title> <description> <possible outcomes (comma separated)>", guild=GUILD_ID)
+async def bet_proposal(interaction: discord.Interaction, title: str, description: str, outcomes: str):
+
+    if interaction.channel.id != int(PROP_CHANNEL):
+        await interaction.response.send_message("You can only propose bets in the #proposals channel!", ephemeral=True)
+        return
+    
+    # Create embed for the proposal
+    embed = discord.Embed(
+        title=f"🎲 Bet Proposal - {title}",
+        description=f"{description}\n\n*Proposed by {interaction.user.mention}*",
+        color=0x03c2fc
+    )
+
+    # Process outcomes
+    outcomes = [outcome.strip() for outcome in outcomes.split(",")]
+    for i, outcome in enumerate(outcomes, start=1):
+        embed.add_field(
+            name=f"Outcome {i}",
+            value=f"```{outcome}```",
+            inline=False
+        )
+    
+    embed.set_thumbnail(url="https://tikolu.net/i/tcicn.png")
+    embed.set_footer(text="👍 Support | 👎 Oppose | ❓ Need Clarification")
+
+    # Send the proposal
+    await interaction.response.send_message(embed=embed)
+    message = await interaction.original_response()
+    
+    # Add reactions
+    reactions = ["👍", "👎", "❓"]
+    for reaction in reactions:
+        await message.add_reaction(reaction)
+
+# Help command to show all available commands
+@client.tree.command(name="help", description="Show available commands", guild=GUILD_ID)
+async def help_command(interaction: discord.Interaction):
+
+    if interaction.channel.id != int(BETTING_CHANNEL):
+        await interaction.response.send_message("You can only use /help in the #betting channel!", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="❓ Commands",
+        description="Here are the available commands",
+        color=0x03c2fc
+    )
+    
+    commands = [
+        "**/bal** <user (optional)> - Check your balance or another user's balance 💰",
+        "**/leader** - View top 5 richest users 🤑",
+        "**/daily** - Claim your daily reward 🏆",
+        f"**/give** <amount> <user> - Give another user some {CURRENCY_NAME}",
+        "**/bet** <bet id> <outcome #> <amount> - Place a bet 🎲",
+        "**/open** <user (optional)> - View your own or another user's open bets 📖",
+        "**/history** <user (optional)> - View your own or another user's betting history",
+        "**/proposal** <title> <descr> <outcomes> - Propose a bet (In the #proposals channel)",
+    ]
+    
+    embed.add_field(
+        name="Commands",
+        value="\n".join(commands),
+        inline=False
+    )
+    
+    embed.set_thumbnail(url="https://tikolu.net/i/tcicn.png")
+    embed.set_footer(text="Please use commands in the appropriate channels (#betting, #proposals)")
+
     await interaction.response.send_message(embed=embed)
 
 # Start the bot
 TOKEN = os.getenv('DISCORD_TOKEN')
+webserver.keep_alive()
 client.run(TOKEN)
